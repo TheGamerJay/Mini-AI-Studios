@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Secret Helper — AI Chat</title>
+  <style>
+    body { background: #020d10; color: #f0f0ff; font-family: system-ui, sans-serif;
+           max-width: 640px; margin: 60px auto; padding: 0 1rem; }
+    h1   { background: linear-gradient(90deg,#00e5ff,#7c3aed);
+           -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    #log { min-height: 200px; border: 1px solid #1e2a4a; border-radius: 10px;
+           padding: 1rem; margin-bottom: 1rem; white-space: pre-wrap; font-size: .9rem; }
+    .user { color: #00e5ff; } .bot { color: #cceeff; margin-bottom: .75rem; }
+    #row  { display: flex; gap: .5rem; }
+    input { flex: 1; background: #0f0f1e; border: 1px solid #1e2a4a; border-radius: 8px;
+            color: #f0f0ff; padding: .65rem 1rem; font-size: .95rem; outline: none; }
+    input:focus { border-color: #00e5ff; }
+    button { background: linear-gradient(135deg,#00bcd4,#7c3aed); border: none;
+             border-radius: 8px; color: #fff; padding: .65rem 1.2rem;
+             font-weight: 700; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>Secret Helper</h1>
+  <div id="log"></div>
+  <div id="row">
+    <input id="inp" type="text" placeholder="Ask something..." />
+    <button onclick="send()">Send</button>
+  </div>
+
+  <script>
+    const log = document.getElementById('log');
+    const inp = document.getElementById('inp');
+
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+
+    async function send() {
+      const prompt = inp.value.trim();
+      if (!prompt) return;
+      inp.value = '';
+
+      log.innerHTML += `<div class="user">You: ${prompt}</div>`;
+
+      const res  = await fetch('http://localhost:5000/api/ai', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ prompt })
+      });
+      const data = await res.json();
+      log.innerHTML += `<div class="bot">AI: ${data.response ?? data.error}</div>`;
+      log.scrollTop = log.scrollHeight;
+    }
+  </script>
+</body>
+</html>

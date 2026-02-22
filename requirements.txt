@@ -1,0 +1,29 @@
+# Mini AI Studios — Python dependencies
+# Install with:  pip install -r requirements.txt
+# (PyTorch is handled separately by install_cpu.bat / install_gpu.bat)
+
+# Core ML
+transformers>=4.40.0
+accelerate>=0.27.0
+sentencepiece>=0.1.99
+
+# UI
+gradio>=4.20.0
+
+# Audio I/O & processing
+soundfile>=0.12.0
+scipy>=1.11.0
+numpy>=1.24.0
+
+# MP3 export (requires ffmpeg on PATH — https://ffmpeg.org)
+pydub>=0.25.1
+
+# Audio metadata / ID3 tags
+mutagen>=1.47.0
+
+# Optional: better lyrics via Ollama REST API
+requests>=2.28.0
+
+# FastAPI + uvicorn (same-port /api/ai endpoint)
+fastapi>=0.111.0
+uvicorn>=0.29.0

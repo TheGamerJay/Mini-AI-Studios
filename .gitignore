@@ -1,0 +1,16 @@
+# Generated output files
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment / secrets
+.env
+.venv/
+venv/
+
+# OS junk
+.DS_Store
+Thumbs.db
