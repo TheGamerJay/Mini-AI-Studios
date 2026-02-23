@@ -1,14 +1,19 @@
 """
-Secret Helper — AI music co-writer backed by Ollama.
-Handles: prompt building, Ollama call, JSON parsing/repair, cliché linting.
+Secret Helper — AI music co-writer backed by Ollama (local) or Anthropic (cloud fallback).
+Handles: prompt building, AI call, JSON parsing/repair, cliché linting.
 """
 import json
 import logging
+import os
 import re
 
 import requests
 
 from config import OLLAMA_MODEL, OLLAMA_URL
+
+# Cloud fallback — set ANTHROPIC_API_KEY env var on Railway to enable
+_ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
+_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
 log = logging.getLogger(__name__)
 
@@ -182,7 +187,7 @@ def generate(user_message: str, ui_settings: dict, current_song: dict = None) ->
     size     = ui_settings.get("model_size", "medium")
     sys_p    = SYSTEM_PROMPT_SMALL if size == "small" else SYSTEM_PROMPT
     user_msg = _user_message(user_message, ui_settings, current_song)
-    raw      = _call_ollama(user_msg, system=sys_p)
+    raw      = _call_ai(user_msg, system=sys_p)
     log.debug("[helper] raw: %.500s", raw)
     parsed   = _parse(raw)
     if not parsed["need_clarification"] and not ui_settings.get("instrumental_only"):
@@ -243,7 +248,7 @@ def _user_message(msg: str, ui: dict, current: dict) -> str:
     return "\n".join(lines)
 
 
-# ── Ollama call ────────────────────────────────────────────────────────────────
+# ── AI calls ───────────────────────────────────────────────────────────────────
 
 def _call_ollama(prompt: str, system: str = None) -> str:
     r = requests.post(
@@ -253,7 +258,7 @@ def _call_ollama(prompt: str, system: str = None) -> str:
             "system": system or SYSTEM_PROMPT,
             "prompt": prompt,
             "stream": False,
-            "format": "json",          # force valid JSON output
+            "format": "json",
             "options": {
                 "temperature": 0.72,
                 "top_p": 0.9,
@@ -265,6 +270,30 @@ def _call_ollama(prompt: str, system: str = None) -> str:
     )
     r.raise_for_status()
     return r.json()["response"].strip()
+
+
+def _call_anthropic(prompt: str, system: str = None) -> str:
+    """Call Anthropic Claude as a cloud fallback when Ollama is offline."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
+    msg = client.messages.create(
+        model=_ANTHROPIC_MODEL,
+        max_tokens=2500,
+        system=system or SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return msg.content[0].text.strip()
+
+
+def _call_ai(prompt: str, system: str = None) -> str:
+    """Try Ollama first; fall back to Anthropic if Ollama is unreachable."""
+    try:
+        return _call_ollama(prompt, system)
+    except Exception as e:
+        if _ANTHROPIC_KEY:
+            log.info("[helper] Ollama unavailable (%s) — using Anthropic fallback", e)
+            return _call_anthropic(prompt, system)
+        raise
 
 
 # ── JSON parsing + repair ──────────────────────────────────────────────────────
@@ -328,7 +357,7 @@ def _parse(raw: str) -> dict:
             "Return ONLY valid JSON matching the schema. "
             f"Here is the broken output to fix:\n{raw}\n\nFix it. Return ONLY corrected JSON."
         )
-        return _normalize(json.loads(_call_ollama(repair)))
+        return _normalize(json.loads(_call_ai(repair)))
     except Exception:
         pass
 
@@ -394,5 +423,5 @@ def _lint(parsed: dict) -> dict:
         "Return the COMPLETE updated JSON (same schema). No markdown.\n\n"
         f"Current JSON:\n{json.dumps(parsed)}"
     )
-    fixed = _parse(_call_ollama(fix))
+    fixed = _parse(_call_ai(fix))
     return fixed if fixed["lyrics"]["text"] else parsed
