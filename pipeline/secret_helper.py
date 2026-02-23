@@ -15,6 +15,41 @@ from config import OLLAMA_MODEL, OLLAMA_URL
 _ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
 _ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
+# Redis cache — set REDIS_URL env var on Railway to enable
+_REDIS_URL   = os.environ.get("REDIS_URL", "")
+_CACHE_TTL   = 3600   # 1 hour
+
+
+def _redis():
+    """Return a Redis client, or None if REDIS_URL is not set."""
+    if not _REDIS_URL:
+        return None
+    try:
+        import redis
+        return redis.from_url(_REDIS_URL, decode_responses=True, socket_timeout=2)
+    except Exception:
+        return None
+
+
+def _cache_get(key: str):
+    r = _redis()
+    if not r:
+        return None
+    try:
+        return r.get(key)
+    except Exception:
+        return None
+
+
+def _cache_set(key: str, value: str):
+    r = _redis()
+    if not r:
+        return
+    try:
+        r.setex(key, _CACHE_TTL, value)
+    except Exception:
+        pass
+
 log = logging.getLogger(__name__)
 
 # ── Banned phrases ─────────────────────────────────────────────────────────────
@@ -286,14 +321,26 @@ def _call_anthropic(prompt: str, system: str = None) -> str:
 
 
 def _call_ai(prompt: str, system: str = None) -> str:
-    """Try Ollama first; fall back to Anthropic if Ollama is unreachable."""
+    """Try cache → Ollama → Anthropic fallback."""
+    import hashlib
+    cache_key = "sh:" + hashlib.sha256((str(system) + prompt).encode()).hexdigest()
+
+    cached = _cache_get(cache_key)
+    if cached:
+        log.info("[helper] Redis cache hit")
+        return cached
+
     try:
-        return _call_ollama(prompt, system)
+        result = _call_ollama(prompt, system)
     except Exception as e:
         if _ANTHROPIC_KEY:
             log.info("[helper] Ollama unavailable (%s) — using Anthropic fallback", e)
-            return _call_anthropic(prompt, system)
-        raise
+            result = _call_anthropic(prompt, system)
+        else:
+            raise
+
+    _cache_set(cache_key, result)
+    return result
 
 
 # ── JSON parsing + repair ──────────────────────────────────────────────────────
