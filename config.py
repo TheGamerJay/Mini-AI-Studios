@@ -4,6 +4,7 @@ Secret Helper — Central Configuration
 CPU-ready, GPU-upgradeable.
 Change DEVICE here to switch between runtimes — propagates everywhere.
 """
+import os
 import torch
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -30,8 +31,10 @@ LYRICS_BACKEND = "ollama"
 LYRICS_MODEL   = "gpt2"
 
 # ── Ollama (optional) ─────────────────────────────────────────────────────────
-OLLAMA_URL   = "http://localhost:11434"
-OLLAMA_MODEL = "qwen2.5:3b"
+# Locally: http://localhost:11434  |  Railway: set OLLAMA_BASE_URL env var
+OLLAMA_URL           = os.environ.get("OLLAMA_BASE_URL",      "http://localhost:11434")
+OLLAMA_MODEL         = os.environ.get("OLLAMA_MODEL",         "qwen2.5:3b")      # writer
+OLLAMA_PLANNER_MODEL = os.environ.get("OLLAMA_PLANNER_MODEL", "deepseek-r1:1.5b") # planner
 
 # ── Audio output ──────────────────────────────────────────────────────────────
 OUTPUT_SAMPLE_RATE = 44100   # Hz

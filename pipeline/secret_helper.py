@@ -1,5 +1,5 @@
 """
-Secret Helper — AI music co-writer backed by Ollama (local) or Anthropic (cloud fallback).
+Secret Helper — AI music co-writer backed by Ollama.
 Handles: prompt building, AI call, JSON parsing/repair, cliché linting.
 """
 import json
@@ -9,11 +9,7 @@ import re
 
 import requests
 
-from config import OLLAMA_MODEL, OLLAMA_URL
-
-# Cloud fallback — set ANTHROPIC_API_KEY env var on Railway to enable
-_ANTHROPIC_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
-_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+from config import OLLAMA_MODEL, OLLAMA_PLANNER_MODEL, OLLAMA_URL
 
 # Redis cache — set REDIS_URL env var on Railway to enable
 _REDIS_URL   = os.environ.get("REDIS_URL", "")
@@ -51,6 +47,18 @@ def _cache_set(key: str, value: str):
         pass
 
 log = logging.getLogger(__name__)
+
+# ── Planner prompt (deepseek-r1) ───────────────────────────────────────────────
+
+PLANNER_SYSTEM = """You are a song planning assistant. Given the user's request and settings, write a SHORT creative brief for the songwriter.
+Cover: core emotion/story, key imagery to avoid clichés, tone and vocal delivery style, any structural suggestions.
+Be concise — 3 to 8 sentences. Plain text only. No JSON. No markdown. No lists."""
+
+
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> blocks output by deepseek-r1 before the response."""
+    return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
 
 # ── Banned phrases ─────────────────────────────────────────────────────────────
 
@@ -218,13 +226,35 @@ _FALLBACK: dict = {
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def generate(user_message: str, ui_settings: dict, current_song: dict = None) -> dict:
-    """Main entry: build prompt → call Ollama → parse → lint → return dict."""
-    size     = ui_settings.get("model_size", "medium")
-    sys_p    = SYSTEM_PROMPT_SMALL if size == "small" else SYSTEM_PROMPT
-    user_msg = _user_message(user_message, ui_settings, current_song)
-    raw      = _call_ai(user_msg, system=sys_p)
+    """Main entry: plan (deepseek-r1) → write (qwen2.5) → parse → lint → return dict."""
+    import hashlib
+    size  = ui_settings.get("model_size", "medium")
+    sys_p = SYSTEM_PROMPT_SMALL if size == "small" else SYSTEM_PROMPT
+
+    # Top-level cache check (skips both planner + writer on hit)
+    cache_key = "sh:" + hashlib.sha256(
+        (str(ui_settings) + user_message + str(current_song)).encode()
+    ).hexdigest()
+    cached = _cache_get(cache_key)
+    if cached:
+        log.info("[helper] Redis cache hit")
+        try:
+            return _normalize(json.loads(cached))
+        except Exception:
+            pass
+
+    # Stage 1 — deepseek-r1: plan / creative brief
+    brief = _plan(user_message, ui_settings)
+    log.debug("[helper] brief: %s", brief[:200] if brief else "(skipped)")
+
+    # Stage 2 — qwen2.5: write lyrics
+    user_msg = _user_message(user_message, ui_settings, current_song, brief=brief)
+    raw      = _call_ollama(user_msg, system=sys_p)
     log.debug("[helper] raw: %.500s", raw)
-    parsed   = _parse(raw)
+
+    _cache_set(cache_key, raw)
+
+    parsed = _parse(raw)
     if not parsed["need_clarification"] and not ui_settings.get("instrumental_only"):
         parsed = _lint(parsed)
     return parsed
@@ -232,7 +262,7 @@ def generate(user_message: str, ui_settings: dict, current_song: dict = None) ->
 
 # ── Prompt builders ────────────────────────────────────────────────────────────
 
-def _user_message(msg: str, ui: dict, current: dict) -> str:
+def _user_message(msg: str, ui: dict, current: dict, brief: str = "") -> str:
     voice = ui.get("voice") or "auto"
     genre = ui.get("genre") or "auto"
     bpm   = ui.get("bpm")   or "auto"
@@ -271,6 +301,8 @@ def _user_message(msg: str, ui: dict, current: dict) -> str:
         f"- lyrics_language: {lang}  ← MANDATORY — write ALL lyrics ONLY in {lang}. Not English unless {lang} is English.",
         f"- song_structure: {' → '.join(structure)}  ← use EXACTLY these section headers, each on its own line",
     ]
+    if brief:
+        lines += ["", f"Creative brief (planning stage): {brief}"]
     if current:
         lines += ["", f"Current song draft (JSON): {json.dumps(current)}"]
     lines += [
@@ -285,11 +317,11 @@ def _user_message(msg: str, ui: dict, current: dict) -> str:
 
 # ── AI calls ───────────────────────────────────────────────────────────────────
 
-def _call_ollama(prompt: str, system: str = None) -> str:
+def _call_ollama(prompt: str, system: str = None, model: str = None) -> str:
     r = requests.post(
         f"{OLLAMA_URL}/api/generate",
         json={
-            "model":  OLLAMA_MODEL,
+            "model":  model or OLLAMA_MODEL,
             "system": system or SYSTEM_PROMPT,
             "prompt": prompt,
             "stream": False,
@@ -307,21 +339,27 @@ def _call_ollama(prompt: str, system: str = None) -> str:
     return r.json()["response"].strip()
 
 
-def _call_anthropic(prompt: str, system: str = None) -> str:
-    """Call Anthropic Claude as a cloud fallback when Ollama is offline."""
-    import anthropic
-    client = anthropic.Anthropic(api_key=_ANTHROPIC_KEY)
-    msg = client.messages.create(
-        model=_ANTHROPIC_MODEL,
-        max_tokens=2500,
-        system=system or SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return msg.content[0].text.strip()
+def _plan(user_message: str, ui_settings: dict) -> str:
+    """Stage 1 — deepseek-r1 builds a creative brief for the writer."""
+    try:
+        genre = ui_settings.get("genre") or "auto"
+        mood  = ui_settings.get("mood")  or "auto"
+        voice = ui_settings.get("voice") or "auto"
+        brief_prompt = (
+            f"User request: {user_message}\n"
+            f"Genre: {genre} | Voice: {voice} | Mood: {mood}\n\n"
+            "Write a creative brief for the songwriter."
+        )
+        raw = _call_ollama(brief_prompt, system=PLANNER_SYSTEM,
+                           model=OLLAMA_PLANNER_MODEL)
+        return _strip_think(raw)
+    except Exception as e:
+        log.warning("[helper] Planner skipped (%s)", e)
+        return ""
 
 
 def _call_ai(prompt: str, system: str = None) -> str:
-    """Try cache → Ollama → Anthropic fallback."""
+    """Try cache → Ollama."""
     import hashlib
     cache_key = "sh:" + hashlib.sha256((str(system) + prompt).encode()).hexdigest()
 
@@ -330,15 +368,7 @@ def _call_ai(prompt: str, system: str = None) -> str:
         log.info("[helper] Redis cache hit")
         return cached
 
-    try:
-        result = _call_ollama(prompt, system)
-    except Exception as e:
-        if _ANTHROPIC_KEY:
-            log.info("[helper] Ollama unavailable (%s) — using Anthropic fallback", e)
-            result = _call_anthropic(prompt, system)
-        else:
-            raise
-
+    result = _call_ollama(prompt, system)
     _cache_set(cache_key, result)
     return result
 
