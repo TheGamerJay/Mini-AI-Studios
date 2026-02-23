@@ -24,12 +24,28 @@ from pipeline.vocal_gen import VOICE_PRESETS
 os.makedirs("output", exist_ok=True)
 
 
-def _check_ollama() -> tuple:
-    """Returns (online, model_ready, message)."""
+def _pull_model(model: str):
+    """Pull a model via Ollama API (blocking). Used on cloud startup."""
     try:
-        r = requests.get(f"{config.OLLAMA_URL}/api/tags", timeout=3)
+        print(f"[ollama] pulling {model} ...")
+        requests.post(f"{config.OLLAMA_URL}/api/pull",
+                      json={"name": model, "stream": False}, timeout=600)
+        print(f"[ollama] {model} pull complete")
+    except Exception as e:
+        print(f"[ollama] pull failed for {model}: {e}")
+
+
+def _check_ollama() -> tuple:
+    """Returns (online, model_ready, message). Auto-pulls on cloud if needed."""
+    try:
+        r = requests.get(f"{config.OLLAMA_URL}/api/tags", timeout=5)
         models = [m["name"] for m in r.json().get("models", [])]
         found = any(config.OLLAMA_MODEL.split(":")[0] in m for m in models)
+        if not found and os.environ.get("OLLAMA_BASE_URL"):
+            # On Railway — auto-pull both models in background
+            threading.Thread(target=_pull_model, args=(config.OLLAMA_MODEL,),        daemon=True).start()
+            threading.Thread(target=_pull_model, args=(config.OLLAMA_PLANNER_MODEL,), daemon=True).start()
+            return True, False, f"Pulling {config.OLLAMA_MODEL} — this takes a minute on first run..."
         if found:
             return True, True, f"Ollama OK — {config.OLLAMA_MODEL} ready"
         return True, False, (
